@@ -15,6 +15,7 @@ from game import Agent
 
 #Constants
 DEFAULTDEPTH=2
+POWERCAPSULETIME=80
 
 #################
 # Team creation #
@@ -45,24 +46,68 @@ def createTeam(firstIndex, secondIndex, isRed,
 ##########
 
 class RaptorAgent(CaptureAgent):
+  powerTimer=0
+  isTimerTracker=True
   def registerInitialState(self,gameState):
     CaptureAgent.registerInitialState(self, gameState) #Pointless comment
     self.inferenceMods = {i:ExactInference(i,self.index,gameState) for i in self.getOpponents(gameState)}
+    if self.isTimerTracker:
+      self.isTimerTracker=True
+      RaptorAgent.isTimerTracker=False
+    self.foodNum = 0
+    if (not gameState.isOnRedTeam(self.index)):
+        RaptorAgent.weights['score']=-abs(RaptorAgent.weights['score'])
 
   def chooseAction(self,gameState):
-    return max([(self.evaluate(state),action) for state,action in [(gameState.generateSuccessor(self.index,a),a) for a in gameState.getLegalActions(self.index)]])[1]
+    try:
+        action = max([(self.evaluate(state,action),action) for state,action in [(gameState.generateSuccessor(self.index,a),a) for a in gameState.getLegalActions(self.index)]])[1]
+
+        if RaptorAgent.powerTimer>0 and self.isTimerTracker:
+          RaptorAgent.powerTimer-=2
+
+        if gameState.generateSuccessor(self.index,action).getAgentPosition(self.index) in self.getCapsules(gameState):
+          RaptorAgent.powerTimer=POWERCAPSULETIME
+
+        if gameState.generateSuccessor(self.index,action).getAgentPosition(self.index) in self.getFood(gameState).asList():
+          self.foodNum+=1
+
+        if self.side(gameState)==0.0:
+          self.foodNum=0
+
+
+
+        return action
+    except Exception:
+        return random.choice(gameState.getLegalActions())
 
   weights={
       'nearestFood':2.0,
-      'opponent':0.5,
-      'score':200.0,
-      'ally':-0.2,
+      'opponent':1.0,
+      'score':800.0,
+      'ally':-0.4,
+      'nearestPellet':2.0,
+      'immediateOpponent':-5000000000.0,
+      'isPowered':5000000000.0,
+      'isDeadEnd':-100,
+      'holdFood':-0.01,
+      'dropFood':100,
+      'isStop':-100,
       }
-  def evaluate(self,gameState):
+  def evaluate(self,gameState,action):
+    width, height = gameState.data.layout.width, gameState.data.layout.height
     features={
         'nearestFood':1.0/min(self.getMazeDistance(gameState.getAgentPosition(self.index),p) for p in self.getFood(gameState).asList()),
-        'opponent':self.sideEval(gameState,min([self.inferenceMods[i].getMostLikelyPosition() for i in self.inferenceMods],key=lambda x:self.getMazeDistance(gameState.getAgentPosition(self.index),x)))*1.0/(1+min([self.getMazeDistance(gameState.getAgentPosition(self.index),self.inferenceMods[i].getMostLikelyPosition()) for i in self.inferenceMods])),'score': gameState.getScore(),
-        'ally': (1.0-self.sideEval(gameState,gameState.getAgentPosition([i for i in self.getTeam(gameState) if i != self.index][0])))*1.0/(1+self.getMazeDistance(gameState.getAgentPosition([i for i in self.getTeam(gameState) if i != self.index][0]),gameState.getAgentPosition(self.index)))}
+        'nearestPellet':100.0 if len(self.getCapsules(gameState))==0 else 1.0/min(self.getMazeDistance(gameState.getAgentPosition(self.index),p) for p in self.getCapsules(gameState)),
+        'opponent':(1.0/(10*self.powerTimer) if self.isPowered() else 1.0)*self.sideEval(gameState,min([self.inferenceMods[i].getMostLikelyPosition() for i in self.inferenceMods],key=lambda x:self.getMazeDistance(gameState.getAgentPosition(self.index),x)))*1.0/(1+min([self.getMazeDistance(gameState.getAgentPosition(self.index),self.inferenceMods[i].getMostLikelyPosition()) for i in self.inferenceMods])),
+        'score': gameState.getScore(),
+        'ally': (1.0-self.sideEval(gameState,gameState.getAgentPosition([i for i in self.getTeam(gameState) if i != self.index][0])))*1.0/(1+self.getMazeDistance(gameState.getAgentPosition([i for i in self.getTeam(gameState) if i != self.index][0]),gameState.getAgentPosition(self.index))),
+        'immediateOpponent':(0.0 if self.isPowered() else 1.0) * self.side(gameState)*(1.0 if 1.0==util.manhattanDistance(min([self.inferenceMods[i].getMostLikelyPosition() for i in self.inferenceMods],key=lambda x:self.getMazeDistance(gameState.getAgentPosition(self.index),x)),gameState.getAgentPosition(self.index)) else 0.0),
+        'isPowered':1.0 if self.isPowered() else 0.0,
+        'isDeadEnd':1.0 if len(gameState.getLegalActions(self.index))<=2 else 0.0,
+        'holdFood':self.foodNum*(min([self.distancer.getDistance(gameState.getAgentPosition(self.index),p) for p in [(width/2,i) for i in range(1,height) if not gameState.hasWall(width/2,i)]]))*self.side(gameState),
+        'dropFood':self.foodNum*(1.0-self.side(gameState)),
+        'isStop':1.0 if action==Directions.STOP else 0.0
+        }
     for i in self.inferenceMods:
       self.inferenceMods[i].step(gameState)
     return sum([self.weights[i]*features[i] for i in features])
@@ -81,6 +126,23 @@ class RaptorAgent(CaptureAgent):
         return -1.0
       else:
         return 1.0
+
+  def side(self,gameState):
+    width, height = gameState.data.layout.width, gameState.data.layout.height
+    pos = gameState.getAgentPosition(self.index)
+    if self.index%2==1:
+      if pos[0]<width/(2):
+        return 1.0
+      else:
+        return 0.0
+    else:
+      if pos[0]>width/2-1:
+        return 1.0
+      else:
+        return 0.0
+
+  def isPowered(self):
+    return self.powerTimer>0
 
 #class MultiAgentSearchAgent(Agent):
   #def __init__(self, evaluationFunction, depth = '10'):
@@ -133,7 +195,6 @@ class DummyAgent(CaptureAgent):
 
     for mod in self.inferenceMods:
       mod.step(gameState)
-      print mod.getMostLikelyPosition()
     return actions[0]
 
 class ExactInference:
